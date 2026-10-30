@@ -2,3 +2,9 @@
 
 data/test
 data/train
+
+.DS_Store
+
+data/.DS_Store
+dataloader/__pycache__
+model/__pycache__

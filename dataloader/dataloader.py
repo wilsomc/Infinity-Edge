@@ -84,6 +84,8 @@ class DataLoader():
 
 
         rgb_transform = transforms.Compose([
+            # TODO: remove transforms.Resize((320, 384))
+            transforms.Resize((320, 384)), # shrink dimensions for initial training to test validity
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
@@ -92,12 +94,14 @@ class DataLoader():
         ])
 
         depth_transform = transforms.Compose([
+            # TODO: remove transforms.Resize((320, 384))
+            transforms.Resize((320, 384)),  # shrink dimensions for initial training to test validity
             transforms.ToTensor()
         ])
 
-
+        # TODO: change shuffle=True
         trainset = CustomDataset(train_list, train_path, rgb_transform=rgb_transform, depth_transform=depth_transform)
-        trainloader = torch.utils.data.DataLoader(trainset, batch_size=self.batch_size, shuffle=True, collate_fn=self.depth_collate_fn, num_workers=0)
+        trainloader = torch.utils.data.DataLoader(trainset, batch_size=self.batch_size, shuffle=False, collate_fn=self.depth_collate_fn, num_workers=0)
 
         testset = CustomDataset(test_list, test_path, rgb_transform=rgb_transform, depth_transform=depth_transform)
         testloader = torch.utils.data.DataLoader(testset, batch_size=self.batch_size, collate_fn=self.depth_collate_fn, shuffle=False, num_workers=0)

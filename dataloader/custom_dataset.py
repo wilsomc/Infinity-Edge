@@ -25,23 +25,38 @@ class CustomDataset(Dataset):
         depth_path = self.dir_path / "depth_bfx"
 
         file_prefix = Path(self.image_list[idx]).stem
-        image_file_path = Path(image_path / file_prefix)
-        depth_file_path = Path(depth_path / file_prefix)
+        image_file_path = image_path / f"{file_prefix}.jpg"
+        depth_file_path = depth_path / f"{file_prefix}.png"
 
-        rgb_image = Image.open(image_file_path.with_suffix(".jpg")).convert("RGB")
-        depth_image = Image.open(depth_file_path.with_suffix(".png"))
+        try:
+            with Image.open(image_file_path) as img:
+                img.load()
+                rgb_image = img.convert("RGB")
+
+            with Image.open(depth_file_path) as img:
+                img.load()
+                depth_image = img.copy()
+
+        except Exception as e:
+            print(f"Error: {e}")
+            print(f"Attempting to load image: {file_prefix}")
+            print(f"Image Path: {image_file_path}")
+            print(f"Depth Path: {depth_file_path}")
+
+            raise RuntimeError(
+                f"Failed to load dataset index {idx}"
+            ) from e
 
         # Apply transformations (like converting to a PyTorch Tensor)
         if self.rgb_transform:
             rgb_tensor = self.rgb_transform(rgb_image)
         else:
-            # Fallback if no transform is provided (less ideal)
-            rgb_tensor = torch.tensor(rgb_image, dtype=torch.float32)
+            raise ValueError("RGB transform is required")
 
         if self.depth_transform:
             depth_tensor = self.depth_transform(depth_image)
         else:
-            depth_tensor = torch.tensor(depth_image, dtype=torch.float32)
+            raise ValueError("Depth transform is required")
 
 
         return rgb_tensor, depth_tensor

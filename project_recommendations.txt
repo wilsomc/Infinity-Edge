@@ -1,0 +1,317 @@
+INFINITY EDGE - PROJECT REVIEW AND RECOMMENDATIONS
+Reviewed October 31, 2026
+Hardware considered: MacBook M4 Pro, 16 GB unified memory; Colab access.
+
+MAIN RECOMMENDATION
+Keep your current pretrained ResNet-34 encoder and U-Net-style decoder. The
+highest-value improvements are correct depth data, trustworthy evaluation,
+checkpointing, and a few controlled experiments. A larger model is a lower
+priority than completing and validating what the proposal already describes.
+Use the Mac for debugging and short experiments; prefer an available Colab
+CUDA GPU for longer training and fine-tuning, after measuring actual speed.
+
+SCOPE AND LIMITS
+I read the entire one-page ECS 174 Project (2).pdf and all six Python files,
+plus README.md and requirements.txt. The PDF is your group's proposal, not an
+instructor grading rubric. Features described there are proposal commitments;
+additional ideas below are recommendations, not asserted course requirements.
+The local data/ and results/ folders contain only .gitkeep files. There are no
+local images, checkpoints, learning curves, or measured results to assess.
+This is a static review: I did not train, benchmark, or execute the model.
+No source code, README, dependencies, or PDF were changed.
+Paths and line numbers below refer to this checkout at review time.
+
+1. WHAT ALREADY MATCHES THE PROPOSAL
+
+- model/model.py uses pretrained ResNet-34 as the encoder and an upsampling
+  decoder with skip connections. This matches the proposal's overall design.
+- The loss already computes a masked, valid-pixel-normalized Smooth L1 term.
+  Its masking arithmetic is reasonable for the mask currently supplied.
+- RGB inputs use ImageNet normalization, appropriate for this encoder.
+- Batches have a padding mask and an RGB/depth shape-alignment check.
+- script/CNN.py:10-16 already selects CUDA, then MPS, then CPU. Your Mac GPU
+  path is present; it does not need an NVIDIA GPU to use acceleration. [S1]
+
+2. HIGHEST PRIORITY: MAKE THE DATA AND RESULTS TRUSTWORTHY
+
+A. Correct the test-image listing before any evaluation.
+Evidence: dataloader/dataloader.py:82-83 builds BOTH train_list and test_list
+from train_path / 'rgb'. The test dataset then looks for those training names
+inside the test directory (lines 106-107).
+Recommendation: build each list from its own split; filter supported image
+extensions, sort filenames, and verify every RGB/depth pair exists.
+Why: disjoint filenames can cause missing-file failures. Coincidentally matching
+names can silently omit or misidentify test examples. This bug alone does not
+prove training images are being loaded as test images, because test_path is
+still used when loading; it does make the intended test manifest unreliable.
+Acceptance check: print split counts and representative pairs, then verify the
+train/validation/test manifests and identities are disjoint.
+
+B. Verify depth encoding, units, dtype, and valid values before training.
+Evidence: dataloader/custom_dataset.py:36-38 copies the PNG, and
+  dataloader/dataloader.py:96-100 only resizes it and applies ToTensor.
+There is no explicit decoding, metric conversion, or float32 conversion.
+Recommendation: inspect representative PNG modes, raw dtypes, min/max values,
+invalid-value counts, and known scene distances. Check the exact Kaggle export
+and original SUN RGB-D documentation/toolbox. Do not assume the repackaged PNGs
+are ordinary 0-255 grayscale or already contain meters. Confirm whether any
+SUN RGB-D-specific decoding has already happened; avoid decoding twice.
+Convert verified depths into a documented unit, preferably meters, and float32.
+ToTensor scaling depends on the input mode/dtype; it is not a universal depth
+converter. [S2] Depending on the export, the current pipeline could therefore
+produce an unintended scale or dtype. Actual files are needed to confirm it.
+Why: even an excellent network cannot learn meaningful metric depth from
+incorrectly interpreted targets. Smooth L1's transition parameter also depends
+on the target scale, so tune it only after establishing units.
+
+C. Mask invalid sensor targets as well as padding.
+Evidence: dataloader/dataloader.py:58-65 marks every original pixel as valid.
+Recommendation: combine the padding mask with finite, positive ground-truth
+depths and any dataset-documented invalid codes/range limits. Define the valid
+range once and use it consistently for training and every evaluation method.
+Sanitize invalid values before arithmetic; multiplying a NaN by zero does not
+remove it. Skip all-invalid batches safely and handle an all-invalid epoch
+without dividing by zero at model/model.py:200.
+Why: missing depth must not become a target of zero meters. At the current
+320x384 size, which is divisible by 32, padding masks will normally be all ones;
+they do not protect against invalid depth measurements.
+
+D. Establish a validation split before tuning.
+Evidence: the loader exposes train/test only, with training shuffle=False
+(dataloader/dataloader.py:102-107).
+Recommendation: preserve a published test split if supplied and create a fixed
+validation subset from training data. Where related frames or scene identities
+exist, split by scene/sequence, not randomly by near-duplicate frames. Save the
+manifests and random seed. Shuffle training only; keep validation/test stable.
+Choose checkpoints and hyperparameters using validation, then evaluate the
+final selected model on the held-out test set.
+Why: repeated tuning on test results makes the final score overly optimistic.
+
+3. COMPLETE THE MAIN PROPOSAL FEATURES
+
+A. Implement the four promised metrics and a real evaluation pass.
+Evidence: model/evaluation.py is an import plus a comment; testing is commented
+out at model/model.py:211. No reported test result is currently produced.
+Recommendation: evaluate with model.eval() and disabled gradient recording,
+using the same valid pixels, units, range, and evaluation resolution throughout.
+Report, with p = predicted depth and d = valid positive target depth:
+  MAE: mean(abs(p-d))
+  RMSE: sqrt(mean((p-d)^2))
+  AbsRel: mean(abs(p-d)/d)
+  Threshold accuracy delta_k: fraction where max(p/d, d/p) < 1.25^k,
+    normally reporting k = 1, 2, 3.
+Ensure predictions are finite and positive before ratio metrics; document the
+chosen positivity/clipping policy. The current final convolution has no output
+constraint (model/model.py:68, 140-144), so negative predictions are possible.
+Consider a positive output such as Softplus after verifying target units.
+Define aggregation explicitly: dataset-wide pixel aggregation or the mean of
+per-image metrics. They differ, especially across image sizes. For a global
+RMSE, aggregate squared errors and valid counts before taking the square root;
+do not average batch RMSEs and label it global RMSE.
+Also report evaluation sample counts and show RGB/target/prediction/error panels
+for a fixed set of validation examples, including failures.
+
+B. Add the depth-gradient loss described in the proposal.
+Evidence: model/model.py:14-15 declares two weights, but fit uses only Smooth
+L1 at lines 175-182. No depth-gradient loss is implemented.
+Recommendation: compare horizontal and vertical finite differences of predicted
+and target depth. Count an edge only when BOTH adjacent target pixels are valid;
+normalize by valid edge counts and exclude padding boundaries. Log each loss
+component separately. The existing 0.8/0.2 weights are an initial experiment,
+not validated settings, because component magnitudes and units matter.
+Why: this directly tests the proposal's idea of preserving depth boundaries.
+Verify whether it improves held-out errors and edges rather than assuming it.
+
+C. Make MiDaS a fair, clearly labeled baseline.
+Evidence: the proposal promises a comparison; there is no baseline code/result.
+Recommendation: begin with a lightweight published checkpoint such as
+MiDaS_small rather than training MiDaS. Record its exact version, weights,
+official preprocessing, evaluation samples, and inference device. [S3]
+MiDaS predicts relative inverse depth, not directly calibrated depth in meters.
+Do not compute meter-based MAE/RMSE directly against its raw output. [S3, S4]
+Options: compare relative structure with an explicitly defined scale/shift
+alignment protocol, or fit and freeze a calibration on validation data before
+reporting a metric-depth comparison on test. State the domain of alignment
+(depth or inverse depth), transformation, valid mask, and any clipping.
+If alignment uses EACH TEST IMAGE'S ground truth, label those scores as
+oracle-aligned relative-depth evaluation; they do not demonstrate metric
+prediction on an unseen image without ground truth. Keep that table separate
+from raw metric-depth performance. If comparing aligned methods, give both
+your model and MiDaS the same alignment protocol.
+Add a cheap constant-depth baseline derived from training targets to verify
+that your own model learns something useful. Note that a large pretrained
+baseline may have training-data overlap with SUN RGB-D source datasets; avoid
+claiming an independently verified zero-shot comparison without checking it.
+
+D. Provide standalone image-to-depth inference.
+Evidence: script/CNN.py trains immediately; it has no saved-model inference
+workflow for a user-supplied image.
+Recommendation: eventually provide a simple command or notebook cell that loads
+a checkpoint, applies matching preprocessing, predicts one image, restores the
+original image dimensions, and saves a numeric depth array plus a color preview.
+A web app is optional; a reproducible single-image workflow satisfies the
+proposal's stated outcome more directly. Use a shared depth color scale for
+comparative panels, since independently normalized colors can hide scale errors.
+
+4. IMPROVE TRAINING WITHOUT CHANGING THE CORE MODEL
+
+A. Add checkpointing, validation curves, and early stopping.
+Evidence: MAX_EPOCH=1 (model/model.py:17); loss_history is neither returned nor
+saved; there are no checkpoint saves.
+Recommendation: save best-validation and latest-resumable checkpoints, including
+weights, optimizer/scheduler state, epoch, config, split manifests, and random
+states. Save train/validation losses and metrics in a simple results file.
+One epoch is a useful smoke test, not evidence of convergence. First confirm
+the model can overfit a tiny fixed subset, e.g. 8-16 correctly decoded pairs.
+Then use a bounded initial budget, e.g. 15-30 total epochs with validation and
+early stopping, and adjust based on measured convergence and compute cost.
+These epoch counts are suggested starting points, not guaranteed requirements.
+
+B. Use staged fine-tuning as a controlled experiment.
+Evidence: the entire encoder is frozen at model/model.py:38-51.
+Recommendation: establish a frozen-encoder baseline first. Then try unfreezing
+layer4, optionally layer3, after the decoder learns useful outputs. Example
+starting learning rates: decoder 1e-3 during warm-up; encoder 1e-5 to 1e-4 during
+fine-tuning, with a reduced decoder rate and validation-based scheduling.
+These are tuning suggestions, not proven best values for your data.
+The code currently puts frozen encoder blocks in eval mode. Preserve that
+behavior deliberately when adding model.train()/eval() transitions: a recursive
+model.train() would re-enable BatchNorm running-stat updates even with frozen
+parameters. Be especially careful with small batches. [S5]
+
+C. Keep modest resolution, then test a higher one if justified.
+Evidence: both transforms currently resize every image to 320x384.
+Recommendation: keep this manageable size for the first baseline. Inspect input
+aspect ratios; if they vary, consider paired aspect-preserving resize/padding
+or crops instead of stretching every scene. Apply geometric augmentation to
+RGB and depth together. Start with horizontal flips; RGB-only mild color jitter
+is a separate option. Avoid independent random transforms on the two modalities.
+Resize a validity mask consistently, and use a depth-resampling method that
+does not mix invalid zeros into valid targets. Nearest-neighbor is a simple
+baseline; mask-aware interpolation is another documented choice.
+Only try higher resolution after correctness and validation are established.
+Increasing both dimensions by 1.5x creates 2.25x as many pixels, with substantial
+activation-memory and runtime cost. It does not guarantee better accuracy.
+
+D. Reserve architecture experiments for after the baseline works.
+Optional: add a second convolution per decoder stage; compare bilinear
+upsampling plus convolution against transposed convolutions if checkerboard
+artifacts appear. Consider ResNet-18 only if measured memory/runtime makes the
+current backbone impractical. Avoid a large transformer or major redesign until
+you have a complete baseline and time to evaluate a change fairly.
+
+5. YOUR M4 PRO 16 GB VS. COLAB
+
+MACBOOK: development and short validation runs
+- Use the existing MPS selection. Start with float32, 320x384, batch size 2;
+  test the existing batch size 4 if memory pressure stays acceptable. These
+  are trial settings, not a verified fit. The 16 GB is shared with macOS and
+  applications, so do not budget it as 16 GB of dedicated GPU memory.
+- Keep num_workers=0 initially, as the code already does. Only tune loading
+  after profiling. Before using workers with a script, add an appropriate main
+  entry guard; the current script runs training at module top level.
+- Use the Mac for depth inspection, the tiny-subset overfit check, plotting,
+  inference, and short baseline runs. Full training is an option if a measured
+  pilot shows it fits your time budget.
+
+COLAB: longer runs and fine-tuning
+- Prefer a CUDA runtime for the controlled full-data experiments. An L4, as
+  proposed, is useful if available, but do not make the workflow depend on it.
+  Check the assigned accelerator, actual memory, and compute-unit balance.
+- Start at batch 4 and 320x384; try batch 8 only if measured memory permits.
+  Reduce batch size before reducing your established resolution if necessary.
+  Gradient accumulation is an option for a larger effective optimizer batch,
+  though it does not reproduce large-batch BatchNorm statistics.
+- After a correct float32 baseline, try CUDA automatic mixed precision with
+  autocast and gradient scaling; check finite losses and metric agreement. [S6]
+- Copy/extract data to the runtime's local disk; save checkpoints/results to
+  persistent storage. Google recommends reducing many small reads from mounted
+  Drive. Colab virtual machines are temporary, so resumability matters. [S7]
+- 'Google Pro' can refer to different subscriptions. Eligible paid Google AI
+  plans can include Colab benefits; storage-only Google One plans do not.
+  Confirm your actual entitlement under Colab Settings > Subscription. A paid
+  plan does not guarantee a particular GPU or unlimited runtime. [S7]
+
+HOW TO CHOOSE USING EVIDENCE
+Run the same corrected configuration on both platforms for a short pilot with
+warm-up. Measure data-loading time, completed training time, validation time,
+and memory. Synchronize the accelerator at timing boundaries. Estimate an
+epoch from measured steps and actual dataset size, then include validation and
+checkpoint overhead. Use measured time and remaining Colab units to choose.
+The proposal's 'hours to a day' estimate has not been verified in this checkout;
+neither platform's exact training speed or memory fit can be promised here.
+
+6. SMALL EXPERIMENT PLAN WITH GOOD REPORT VALUE
+
+Use identical saved splits, resolution, metric definitions, and seed settings.
+Select models using validation; reserve final test evaluation until selection.
+
+Run A: corrected data + frozen ResNet-34 + masked Smooth L1.
+  Purpose: establish a reproducible working baseline.
+Run B: same setup + masked depth-gradient loss.
+  Purpose: isolate the benefit of the loss promised in the proposal.
+Run C: best validated loss setup + staged encoder fine-tuning.
+  Purpose: test whether adapting pretrained features improves your model.
+
+Evaluate MiDaS and the constant baseline separately under the documented
+protocol. Compare MAE/RMSE/AbsRel/delta accuracy, training time, and inference
+time on the same device for speed comparisons. Save fixed qualitative examples.
+If budget permits, repeat the selected configuration with a few seeds to show
+run-to-run variation; avoid a large hyperparameter sweep. Track differing
+training budgets explicitly so improvements are not misattributed.
+
+7. REPRODUCIBILITY AND PRESENTATION CLEANUP
+
+- README.md currently reverses the encoder/decoder roles and says 'RBG'. When
+  you update it yourself, describe ResNet-34 encoder / U-Net-style decoder.
+  Include dataset setup, verified units, split protocol, environment versions,
+  launch instructions, checkpoint loading, and actual measured results.
+- requirements.txt repeats scipy and lists pathlib, which is part of Python's
+  standard library. Recommend removing redundancy and recording compatible,
+  tested torch/torchvision versions after choosing a working environment.
+- Verify a documented project-root launch method. script/CNN.py imports sibling
+  packages, so a direct file invocation may need packaging/path handling; this
+  was not executed and is not confirmed as a runtime error.
+- Reduce per-batch shape prints and frequent device .item() synchronizations
+  once debugging is complete. Keep periodic useful loss and validation logs.
+- Keep inference separate from training and keep configuration explicit:
+  data path, seed, batch size, resolution, epochs, loss weights, and checkpoint.
+
+RECOMMENDED ORDER IF TIME IS LIMITED
+1) Fix split manifests; verify depth conversion, dtype, and valid masks.
+2) Overfit a tiny subset and inspect predictions in correct depth units.
+3) Add validation, metrics, best-checkpoint saving, and resumable training.
+4) Add the gradient-loss ablation and run a measured Colab pilot.
+5) Run the selected training experiments and a fair MiDaS comparison.
+6) Finish standalone inference and a report with honest measured results.
+7) Consider optional architecture/resolution experiments only if time remains.
+
+SOURCES CHECKED FOR THESE RECOMMENDATIONS
+Local evidence: ECS 174 Project (2).pdf, page 1; README.md;
+requirements.txt; dataloader/dataloader.py; dataloader/custom_dataset.py;
+model/model.py; model/evaluation.py; script/CNN.py.
+
+External documentation checked October 31, 2026:
+[S1] PyTorch MPS backend:
+https://docs.pytorch.org/docs/stable/notes/mps.html
+[S2] Torchvision ToTensor scaling and dtype behavior:
+https://docs.pytorch.org/vision/stable/generated/torchvision.transforms.ToTensor.html
+[S3] Official PyTorch Hub MiDaS example (relative inverse depth; small model):
+https://pytorch.org/hub/intelisl_midas_v2/
+[S4] Official MiDaS repository (relative vs. metric depth):
+https://github.com/isl-org/MiDaS
+[S5] PyTorch module train/eval behavior:
+https://docs.pytorch.org/docs/stable/generated/torch.nn.Module.html
+[S6] PyTorch automatic mixed precision recipe:
+https://docs.pytorch.org/tutorials/recipes/recipes/amp_recipe.html
+[S7] Official Colab FAQ (Google AI eligibility, variable hardware, temporary
+runtimes, and Drive I/O recommendations):
+https://research.google.com/colaboratory/faq.html
+Dataset named in the proposal:
+https://www.kaggle.com/datasets/thanhbnhphan/sun-rgbd-2d
+Original SUN RGB-D project:
+https://rgbd.cs.princeton.edu/
+The Kaggle page did not expose readable dataset documentation through the web
+reader, and the original project's live page returned an access error. Exact
+export encoding, split contents, and units remain unverified; check the actual
+archive and toolbox before choosing a decoding procedure.

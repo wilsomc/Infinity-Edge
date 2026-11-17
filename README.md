@@ -11,3 +11,6 @@ Our encoder's feature maps
 | skip3 (layer2) | 128 | H/8 |
 | skip4 (layer3) | 256 | H/16 |
 | bottleneck (layer4) | 512 | H/32 |
+
+# Data Setup
+The dataset for this repository can be found [here](https://drive.google.com/drive/folders/11aBwpUVXk4ZO7JKhR9zIva8kUvEdaV2Q?usp=sharing)

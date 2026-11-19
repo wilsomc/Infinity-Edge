@@ -4,26 +4,34 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch import optim
 from torchvision.models import resnet34, ResNet34_Weights
 
+class RefinedUpBlock(nn.Module):
+    """Bilinear upsampling followed by projection and two spatial convolutions."""
+    def __init__(self, input_channels, skip_channels, output_channels):
+        super().__init__()
+        self.project = nn.Conv2d(input_channels, output_channels, 1)
+        self.refine = nn.Sequential(
+            nn.Conv2d(output_channels + skip_channels, output_channels, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(output_channels, output_channels, 3, padding=1), nn.ReLU(),
+        )
+        nn.init.dirac_(self.refine[2].weight)
+        nn.init.zeros_(self.refine[2].bias)
+
+    def forward(self, x, skip):
+        x = self.project(F.interpolate(x, size=skip.shape[-2:], mode='bilinear', align_corners=False))
+        return self.refine(torch.cat([x, skip], dim=1))
+
+
 class Model(nn.Module):
-    trainloader = None
-    testloader = None
-
-    MASKED_L1_WEIGHT = 0.8
-    GRAD_LOSS_WEIGHT = 0.2
-
-    MAX_EPOCH = 1
-    LEARNING_RATE = 1e-3
-
-    def __init__(self, trainloader, testloader):
-        nn.Module.__init__(self)
-        self.trainloader = trainloader
-        self.testloader = testloader
+    def __init__(self, pretrained=True, architecture='v1'):
+        super().__init__()
+        if architecture not in {'v1', 'v2'}:
+            raise ValueError(f'Unknown model architecture: {architecture}')
+        self.architecture = architecture
 
         # ResNet-34 Encoder
-        resnet_encoder = resnet34(weights=ResNet34_Weights.DEFAULT)
+        resnet_encoder = resnet34(weights=ResNet34_Weights.DEFAULT if pretrained else None)
 
         self.conv1 = resnet_encoder.conv1
         self.bn1 = resnet_encoder.bn1
@@ -35,37 +43,46 @@ class Model(nn.Module):
         self.layer3 = resnet_encoder.layer3
         self.layer4 = resnet_encoder.layer4
 
-        # Freeze encoder parameters
-        # TODO: remove if doesn't work
-        encoder_layers = [
-            self.conv1,
-            self.bn1,
-            self.layer1,
-            self.layer2,
-            self.layer3,
-            self.layer4
-        ]
-        for layer in encoder_layers:
-            for parameter in layer.parameters():
-                parameter.requires_grad = False
-            layer.eval()
+        self.configure_encoder('frozen')
 
-        # U-Net Decoder
-        # Upsamples the image from bottleneck
-        self.up1 = nn.ConvTranspose2d(512, 256, 2, stride=2)
-        self.conv1_d = nn.Conv2d(512, 256, 3, padding=1)
+        if architecture == 'v2':
+            self.up1 = RefinedUpBlock(512, 256, 256)
+            self.up2 = RefinedUpBlock(256, 128, 128)
+            self.up3 = RefinedUpBlock(128, 64, 64)
+            self.up4 = RefinedUpBlock(64, 64, 64)
+            self.final_up = nn.Conv2d(64, 32, 1)
+            self.full_resolution_stem = nn.Sequential(
+                nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(),
+                nn.Conv2d(16, 16, 3, padding=1), nn.ReLU(),
+            )
+            self.full_resolution_refine = nn.Sequential(
+                nn.Conv2d(48, 32, 3, padding=1), nn.ReLU(), nn.Conv2d(32, 32, 3, padding=1),
+            )
+            # Start as a residual of zero, then learn full-resolution corrections.
+            nn.init.zeros_(self.full_resolution_refine[2].weight)
+            nn.init.zeros_(self.full_resolution_refine[2].bias)
+            self.output = nn.Conv2d(32, 1, 1)
+        else:
+            # U-Net Decoder
+            # Upsamples the image from bottleneck
+            self.up1 = nn.ConvTranspose2d(512, 256, 2, stride=2)
+            self.conv1_d = nn.Conv2d(512, 256, 3, padding=1)
 
-        self.up2 = nn.ConvTranspose2d(256, 128, 2, stride=2)
-        self.conv2_d = nn.Conv2d(256, 128, 3, padding=1)
+            self.up2 = nn.ConvTranspose2d(256, 128, 2, stride=2)
+            self.conv2_d = nn.Conv2d(256, 128, 3, padding=1)
 
-        self.up3 = nn.ConvTranspose2d(128, 64, 2, stride=2)
-        self.conv3_d = nn.Conv2d(128, 64, 3, padding=1)
+            self.up3 = nn.ConvTranspose2d(128, 64, 2, stride=2)
+            self.conv3_d = nn.Conv2d(128, 64, 3, padding=1)
 
-        self.up4 = nn.ConvTranspose2d(64, 64, 2, stride=2)
-        self.conv4_d = nn.Conv2d(128, 64, 3, padding=1)
+            self.up4 = nn.ConvTranspose2d(64, 64, 2, stride=2)
+            self.conv4_d = nn.Conv2d(128, 64, 3, padding=1)
 
-        self.final_up = nn.ConvTranspose2d(64, 32, 2, stride=2)
-        self.output = nn.Conv2d(32, 1, 1)
+            self.final_up = nn.ConvTranspose2d(64, 32, 2, stride=2)
+            self.output = nn.Conv2d(32, 1, 1)
+
+    @classmethod
+    def from_config(cls, config, pretrained=False):
+        return cls(pretrained=pretrained, architecture=config.get('architecture', 'v1'))
 
     def encoder(self, x):
         # ResNet encoding
@@ -102,34 +119,21 @@ class Model(nn.Module):
         x = F.relu(conv(x))
         return x
 
-    # Masked SmoothL1Loss, returns loss and total accounted pixels in a batch
-    def masked_smooth_l1(self, criterion, prediction, target, mask):
-        valid_pixel = mask.bool()
-        valid_pixel_count = int(valid_pixel.sum().item())
-
-        if valid_pixel_count == 0:
-            return None, 0
-
-        # replace invalid values with prefilled value
-        prediction = prediction.masked_fill(~valid_pixel, 0)
-        target = target.masked_fill(~valid_pixel, 0)
-
-        print("Prediction shape:", prediction.shape)
-        print("Depth shape:", target.shape)
-        print("Mask shape:", mask.shape)
-        print("Valid pixels:", valid_pixel_count)
-
-        loss = criterion(prediction, target)
-
-        loss = (loss * valid_pixel).sum() / valid_pixel_count
-        return loss, valid_pixel_count
-
-
     def forward(self, x):
         input_size = x.size()[2:]
 
         # Encoder
         bottleneck, skip1, skip2, skip3, skip4 = self.encoder(x)
+
+        if self.architecture == 'v2':
+            features = self.up1(bottleneck, skip4)
+            features = self.up2(features, skip3)
+            features = self.up3(features, skip2)
+            features = self.up4(features, skip1)
+            features = self.final_up(F.interpolate(features, size=input_size, mode='bilinear', align_corners=False))
+            fine = self.full_resolution_stem(x)
+            features = features + self.full_resolution_refine(torch.cat([features, fine], dim=1))
+            return self.output(features)
 
         # Decoder (bottom-up, U-Net architecture with skip connections)
         x = self.decoder(bottleneck, skip4, self.up1, self.conv1_d)
@@ -146,67 +150,62 @@ class Model(nn.Module):
         return x
 
 
-    def fit(self, trainloader, device):
-        smooth_loss = nn.SmoothL1Loss(reduction='none')
-        optimizer = optim.Adam(self.parameters(), lr=self.LEARNING_RATE)
+    def configure_encoder(self, mode='frozen'):
+        """Unfreeze only the chosen late blocks; keep encoder BatchNorm stats fixed."""
+        if mode not in {'frozen', 'layer4', 'layer3_4'}:
+            raise ValueError(f'Unknown encoder training mode: {mode}')
+        for name in ('conv1', 'bn1', 'layer1', 'layer2', 'layer3', 'layer4'):
+            block = getattr(self, name)
+            trainable = name == 'layer4' and mode != 'frozen' or name == 'layer3' and mode == 'layer3_4'
+            for parameter in block.parameters():
+                parameter.requires_grad = trainable
+            block.eval()
+        self.encoder_training = mode
 
-        loss_history = []
+    def training_parameter_groups(self, decoder_lr, encoder_lr):
+        encoder_names = ('conv1.', 'bn1.', 'layer1.', 'layer2.', 'layer3.', 'layer4.')
+        encoder, decoder = [], []
+        for name, parameter in self.named_parameters():
+            if parameter.requires_grad:
+                (encoder if name.startswith(encoder_names) else decoder).append(parameter)
+        groups = [{'params': decoder, 'lr': decoder_lr, 'name': 'decoder'}]
+        if encoder:
+            groups.append({'params': encoder, 'lr': encoder_lr, 'name': 'encoder'})
+        return groups
+
+    def train(self, mode=True):
+        super().train(mode)
+        # Fixed encoder running statistics also stabilize small-batch fine-tuning.
+        for layer in (self.conv1, self.bn1, self.layer1, self.layer2, self.layer3, self.layer4):
+            layer.eval()
+        return self
 
 
-        for epoch in range(self.MAX_EPOCH):
-
-            total_loss = 0.0
-            total_valid_pixels = 0
-
-            running_loss = 0.0
-            running_valid_pixels = 0
-
-            for i, (rgb, depth, mask) in enumerate(trainloader):
-
-                rgb_batch = rgb.to(device)
-                depth_batch = depth.to(device)
-                mask_batch = mask.to(device)
-
-                optimizer.zero_grad()
-                outputs = self(rgb_batch)
-
-                # calculate average loss of all pixels in batch
-                # loss function: aL1_loss + bDepthGrad_Loss
-                l1_loss, valid_pixel_count = self.masked_smooth_l1(smooth_loss, outputs, depth_batch, mask_batch)
-
-
-                if l1_loss is None:
-                    continue
-
-                # loss = (self.MASKED_L1_WEIGHT * l1_loss)
-                loss = l1_loss
-
-                loss.backward()
-                optimizer.step()
-
-                total_loss += loss.item() * valid_pixel_count
-                total_valid_pixels += valid_pixel_count
-
-                running_loss += loss.item() * valid_pixel_count
-                running_valid_pixels += valid_pixel_count
-
-                # print statistics
-                if i % 2 == 0:  # print every 2000 mini-batches
-                    print('[%d, %5d] loss: %.3f' %
-                          (epoch + 1, i + 1, running_loss / running_valid_pixels))
-                    running_loss = 0.0
-                    running_valid_pixels = 0
-
-            epoch_loss = total_loss / total_valid_pixels
-            loss_history.append(epoch_loss)
-
-        print("finished training")
-
-    def run(self, device):
-        print('method running...')
-        print('--start training...')
-        self.to(device)
-        self.fit(self.trainloader, device)
-        print('--start testing...')
-        # self.test(self.testloader)
-        return {'Training / Testing Finished'}
+def transfer_checkpoint(model, checkpoint):
+    """Initialize a v2 model from trained v1 weights without silently dropping keys."""
+    source_architecture = checkpoint['config'].get('architecture', 'v1')
+    if model.architecture == source_architecture:
+        model.load_state_dict(checkpoint['model'])
+        return {'mode':'exact', 'source_architecture':source_architecture}
+    if source_architecture != 'v1' or model.architecture != 'v2':
+        raise ValueError(f'Unsupported architecture transfer: {source_architecture} -> {model.architecture}')
+    source, destination = checkpoint['model'], model.state_dict()
+    encoder_prefixes = ('conv1.', 'bn1.', 'layer1.', 'layer2.', 'layer3.', 'layer4.')
+    for name in destination:
+        if name.startswith(encoder_prefixes):
+            destination[name] = source[name].clone()
+    for number in range(1, 5):
+        prefix = f'up{number}'
+        destination[f'{prefix}.project.weight'] = source[f'{prefix}.weight'].mean(dim=(2,3)).transpose(0,1).unsqueeze(-1).unsqueeze(-1)
+        destination[f'{prefix}.project.bias'] = source[f'{prefix}.bias'].clone()
+        for suffix in ('weight','bias'):
+            destination[f'{prefix}.refine.0.{suffix}'] = source[f'conv{number}_d.{suffix}'].clone()
+    destination['final_up.weight'] = source['final_up.weight'].mean(dim=(2,3)).transpose(0,1).unsqueeze(-1).unsqueeze(-1)
+    destination['final_up.bias'] = source['final_up.bias'].clone()
+    destination['output.weight'] = source['output.weight'].clone()
+    destination['output.bias'] = source['output.bias'].clone()
+    model.load_state_dict(destination)
+    return {'mode':'v1_to_v2', 'source_architecture':'v1',
+            'encoder':'all trained weights and BatchNorm statistics copied exactly',
+            'decoder':'matching spatial/output convolutions copied; upsampling projections use mean legacy kernel',
+            'new_layers':'second stage convolutions initialized to identity; full-resolution residual initialized to zero'}

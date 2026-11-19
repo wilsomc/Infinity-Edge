@@ -1,8 +1,9 @@
 torch
 torchvision
 numpy
-scipy
 matplotlib
-scipy
-pathlib
 pillow
+certifi
+timm
+opencv-python-headless
+pillow-heif

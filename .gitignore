@@ -9,3 +9,8 @@ data/train
 data/.DS_Store
 dataloader/__pycache__
 model/__pycache__
+
+.venv/
+__pycache__/
+results/*
+!results/.gitkeep

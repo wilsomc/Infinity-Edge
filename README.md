@@ -13,11 +13,11 @@ Our encoder's feature maps
 | bottleneck (layer4) | 512 | H/32 |
 
 # Setup
-1. Create a virtual environment
+1. Create a virtual environment <br>
 Type `python -m venv venv` in command line
-2. Install dependencies
+2. Install dependencies <br>
 Type `pip install -r requirements.txt` in command line
-3. Download the dataset and put it in `data/` or `dataloader/`
+3. Download the dataset and put it in `data/` or `dataloader/` <br>
 The dataset for this repository can be found [here](https://drive.google.com/drive/folders/11aBwpUVXk4ZO7JKhR9zIva8kUvEdaV2Q?usp=sharing)
 4. Run the model
 5. Check `results/` for the output

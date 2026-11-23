@@ -1,4 +1,3 @@
-"""Run from the repository root: python -m script.CNN inspect|train|evaluate."""
 import argparse
 import hashlib
 import json
@@ -11,6 +10,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from model.runtime import select_device
 from dataloader.custom_dataset import decode_depth
 from dataloader.dataloader import load_manifest, make_loader, audit_manifest
 from model.evaluation import evaluate
@@ -44,7 +44,6 @@ def epoch_records(records, seed, epoch):
 
 
 def configure_https_certificates():
-    """Use certifi if this Python installation has no default CA locations."""
     paths = ssl.get_default_verify_paths()
     if (paths.cafile is None and paths.capath is None
             and 'SSL_CERT_FILE' not in os.environ and 'SSL_CERT_DIR' not in os.environ):
@@ -113,9 +112,7 @@ def main():
         write_json(args.output / 'data_inspection.json', report)
         print(json.dumps(report, indent=2))
         return
-    device = args.device
-    if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    device = select_device(args.device)
     device = torch.device(device)
     print('Device:', device, flush=True)
     if args.command == 'evaluate':
@@ -228,7 +225,6 @@ def main():
                 atomic_save(snapshot(step), args.output / 'recovery.pt')
         if not count:
             raise ValueError('Training epoch contains no valid target pixels')
-        # Save before validation as well, so a validation interruption loses no training batches.
         atomic_save(snapshot(batches), args.output / 'recovery.pt')
         validation = evaluate(model, valloader, device, config)
         mean_grad = gradient_total / edge_count if edge_count else 0.0
@@ -236,7 +232,6 @@ def main():
         history.append({'epoch': epoch, 'train_smooth_l1': total / count, 'train_gradient_loss': mean_grad,
                         'train_total_loss': (1 - weight) * total / count + weight * mean_grad,
                         'train_valid_edges': edge_count, 'validation': validation})
-        # Keep the same checkpoint-selection criterion for the controlled comparison.
         improved = validation['smooth_l1'] < best
         if improved:
             best = validation['smooth_l1']
@@ -246,7 +241,6 @@ def main():
         print(f'Epoch {epoch}: train={total/count:.5f}, validation={validation["smooth_l1"]:.5f}', flush=True)
         start_batch, total, count = 0, 0.0, 0
         gradient_total, edge_count = 0.0, 0
-    # Reload the selected checkpoint for reproducible validation panels.
     payload = torch.load(args.output / 'best.pt', map_location='cpu', weights_only=True)
     model.load_state_dict(payload['model'])
     result = evaluate(model, valloader, device, config, args.output / 'validation', args.examples)

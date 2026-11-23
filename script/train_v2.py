@@ -1,4 +1,3 @@
-"""Train higher-resolution depth with letterboxing, augmentation, and staged encoder tuning."""
 import argparse
 import copy
 import json
@@ -11,9 +10,9 @@ from pathlib import Path
 
 import torch
 
+from model.runtime import file_hash, select_device
 from dataloader.dataloader import audit_manifest, load_manifest
 from model.canonical_evaluation import evaluate_canonical, PROTOCOL
-from model.inference import file_hash
 from model.model import Model, transfer_checkpoint
 from model.staged_training import train_staged
 from script.CNN import ROOT, manifest_hash, write_json
@@ -22,7 +21,6 @@ from script.v2_report import write_v2_report
 
 
 def promote_if_better(candidate, reference, checkpoint, registry):
-    """Publish a local default only after a comparable full validation result."""
     for key in ['evaluation_protocol','manifest_hash','images','valid_pixels','min_depth','max_depth']:
         if candidate.get(key) != reference.get(key):
             raise ValueError(f'Cannot compare validation results: {key} differs')
@@ -131,9 +129,7 @@ def main():
         for split in ['train','validation','test']:
             selected_records[split]=manifest[split][:config['limit']]
     audit_manifest(selected_records,config['depth_encoding'],args.output/'integrity.json',('train','validation'))
-    device=args.device
-    if device=='auto':
-        device='cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    device=select_device(args.device)
     print('Device:',device,'input:',config['size'],'resize:',config['resize_mode'],flush=True)
     if reference is None:
         previous=Model.from_config(source['config']).to(device).eval()
@@ -152,10 +148,8 @@ def main():
         'elapsed_minutes':(time.monotonic()-started)/60,'device':device,
         'limitations':'Single seeded image-level split; scene independence and internet-photo accuracy unverified. Previously observed test is not used for selection.'}
     write_json(args.output/'summary.json',summary)
-    write_v2_report(args.output,summary)
     print('V2 validation:',result,'promoted:',promoted,flush=True)
     if args.evaluate_test:
-        # Evaluate only the chosen default: the source remains selected if v2 did not improve validation.
         chosen=args.output/'best.pt' if promoted else Path(reference['checkpoint'])
         checkpoint=torch.load(chosen,map_location='cpu',weights_only=True)
         chosen_model=Model.from_config(checkpoint['config']).to(device).eval()

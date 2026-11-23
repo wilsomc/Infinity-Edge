@@ -3,10 +3,9 @@ import hashlib
 import random
 
 import numpy as np
-import torch
 from PIL import Image, ImageEnhance
 from torch.utils.data import Dataset
-from dataloader.preprocessing import build_rgb_transform, prepare_rgb, prepare_depth
+from dataloader.preprocessing import prepare_rgb, prepare_depth
 
 
 def decode_depth(raw, encoding):
@@ -49,7 +48,6 @@ class CustomDataset(Dataset):
         self.encoding = encoding
         self.min_depth = min_depth
         self.max_depth = max_depth
-        self.rgb_transform = build_rgb_transform(self.size)
         self.resize_mode = resize_mode
         self.augmentation = augmentation or {}
         self.seed, self.epoch = seed, epoch

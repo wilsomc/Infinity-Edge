@@ -1,4 +1,3 @@
-"""Save a readable outcome and validation curves for a completed v2 run."""
 import json
 from pathlib import Path
 

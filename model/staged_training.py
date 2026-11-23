@@ -8,7 +8,6 @@ import torch
 from dataloader.dataloader import make_loader
 from model.canonical_evaluation import evaluate_canonical, PROTOCOL
 from model.losses import depth_loss
-from model.model import Model
 from script.CNN import atomic_save, epoch_records, manifest_hash, write_json
 
 

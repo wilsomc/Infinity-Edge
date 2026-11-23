@@ -1,5 +1,4 @@
 """Standalone inference with checkpoint preprocessing and no ground-truth data."""
-import hashlib
 import json
 from pathlib import Path
 
@@ -91,11 +90,3 @@ def save_prediction(image, raw, depth, config, output, metadata, overwrite=False
         limitations='Learned indoor depth estimates; original-size output is interpolated, not additional model detail. Accuracy on arbitrary photos is unmeasured.')
     files['metadata'].write_text(json.dumps(metadata, indent=2, allow_nan=False) + '\n')
     return files
-
-
-def file_hash(path):
-    digest = hashlib.sha256()
-    with Path(path).open('rb') as stream:
-        for chunk in iter(lambda: stream.read(1024*1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()

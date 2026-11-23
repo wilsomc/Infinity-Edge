@@ -1,11 +1,9 @@
-"""Predict depth for one photo using a saved Infinity Edge checkpoint."""
 import argparse
 import json
 from pathlib import Path
 
-import torch
-
-from model.inference import file_hash, load_predictor, predict_depth, read_rgb, save_prediction
+from model.runtime import file_hash, select_device
+from model.inference import load_predictor, predict_depth, read_rgb, save_prediction
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -40,9 +38,7 @@ def main():
     destinations = [output/name for name in ['depth_m.npy', 'raw_depth_m.npy', 'depth_color.png', 'preview.png', 'metadata.json']]
     if any(path.resolve() in {args.image.resolve(), args.checkpoint.resolve()} for path in destinations):
         parser.error('Output would overwrite the input photo or model checkpoint; choose another --output')
-    device = args.device
-    if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    device = select_device(args.device)
     try:
         image = read_rgb(args.image)
         model, config, epoch, smoke = load_predictor(args.checkpoint, device)

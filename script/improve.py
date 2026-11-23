@@ -1,4 +1,3 @@
-"""Bounded validation-selected improvement pass, starting each candidate from one checkpoint."""
 import argparse
 import copy
 import shutil
@@ -7,9 +6,9 @@ from pathlib import Path
 
 import torch
 
+from model.runtime import file_hash, select_device
 from dataloader.dataloader import audit_manifest, load_manifest, make_loader
 from model.evaluation import evaluate
-from model.inference import file_hash
 from model.model import Model
 from model.refinement import refine_stage
 from script.CNN import ROOT, manifest_hash, write_json
@@ -61,9 +60,7 @@ def main():
     write_json(args.output/'plan.json', plan)
     write_json(args.output/'splits.json', manifest)
     audit_manifest(manifest, source['config']['depth_encoding'], args.output/'integrity.json', ('train','validation'))
-    device = args.device
-    if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    device = select_device(args.device)
     print('Device:',device,flush=True)
     reference = Model.from_config(source['config']).to(device).eval()
     reference.load_state_dict(source['model'])
@@ -84,7 +81,6 @@ def main():
         output = args.output/experiment['name']
         settings = {k:v for k,v in experiment.items() if k != 'name'}
         settings.update(learning_rate=args.decoder_lr, encoder_learning_rate=args.encoder_lr)
-        # Reserve equal remaining wall time for each remaining candidate.
         stage_deadline = min(deadline, time.monotonic()+remaining/(len(EXPERIMENTS)-index))
         print(f'Starting {experiment["name"]}; up to {args.epochs} additional epochs',flush=True)
         result = refine_stage(source, manifest, settings, output, args.epochs, stage_deadline,
@@ -96,7 +92,6 @@ def main():
         if device == 'mps':
             torch.mps.empty_cache()
     selected = min(candidates, key=lambda c:c['smooth_l1'])
-    # A separate inference checkpoint keeps the old experiment directories intact.
     shutil.copy2(selected['checkpoint'], args.output/'best.pt')
     report = {'plan':plan,'candidates':candidates,'statuses':statuses,'selected':selected,
               'selected_checkpoint':str((args.output/'best.pt').resolve()), 'device':device,

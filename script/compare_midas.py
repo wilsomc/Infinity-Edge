@@ -1,6 +1,4 @@
-"""Oracle-aligned relative-depth comparison; never a raw metric-depth score for MiDaS."""
 import argparse
-import hashlib
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+from model.runtime import file_hash, select_device
 from dataloader.custom_dataset import CustomDataset
 from dataloader.preprocessing import prepare_rgb, restore_prediction
 from model.canonical_evaluation import EVALUATION_SIZE, PROTOCOL
@@ -19,15 +18,10 @@ from model.model import Model
 from script.CNN import ROOT, configure_https_certificates, manifest_hash, write_json
 
 EFFICIENTNET_REVISION = '771ce082b2ce6d033f55b3d47c1f77389ad3c180'
-MIDAS_REVISION = '1645b7e1675301fdfac03640738fe5a6531e17d6'  # official v3_1
+MIDAS_REVISION = '1645b7e1675301fdfac03640738fe5a6531e17d6'
 
 
 def align_inverse_depth(inverse, target, mask, min_depth, max_depth):
-    """Per-image least squares: a*inverse+b ~= 1/target, with a >= 0.
-
-    Uses each evaluation image's ground truth: an oracle relative-depth protocol.
-    Degenerate/negative-correlation inputs use constant mean inverse depth.
-    """
     inverse, target = np.asarray(inverse, dtype=np.float64), np.asarray(target, dtype=np.float64)
     valid = np.asarray(mask, dtype=bool) & np.isfinite(target) & (target >= min_depth) & (target <= max_depth)
     if not valid.any():
@@ -41,14 +35,6 @@ def align_inverse_depth(inverse, target, mask, min_depth, max_depth):
     shift = float(y.mean() - scale * x.mean())
     fitted = np.clip(scale * inverse + shift, 1.0/max_depth, 1.0/min_depth)
     return (1.0 / fitted).astype(np.float32), {'scale': scale, 'shift': shift, 'constant_fit': scale == 0.}
-
-
-def sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open('rb') as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def main():
@@ -83,12 +69,9 @@ def main():
     audit_manifest(manifest, config['depth_encoding'], args.output/'integrity.json', (args.split,))
     records = manifest[args.split][:args.limit] if args.limit else manifest[args.split]
     dataset = CustomDataset(records, config['size'], config['depth_encoding'], config['min_depth'], config['max_depth'])
-    device = args.device
-    if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+    device = select_device(args.device)
     print('Device:', device, flush=True)
     configure_https_certificates()
-    # Keep downloaded source and weights local and out of Git.
     torch.hub.set_dir(str(ROOT/'results/midas-cache'))
     repository = f'isl-org/MiDaS:{MIDAS_REVISION}'
     hub_load = torch.hub.load
@@ -112,8 +95,6 @@ def main():
             record = records[index]
             with Image.open(record['rgb']) as original:
                 original_image = original.convert('RGB')
-            # Legacy runs preserve their original protocol. Mixed/new models use
-            # original-image inputs with each model's documented preprocessing.
             image = np.array(original_image if canonical else original_image.resize(
                 (config['size'][1], config['size'][0]), Image.Resampling.BILINEAR))
             output = midas(transform(image).to(device))
@@ -148,8 +129,8 @@ def main():
         'min_depth': config['min_depth'], 'max_depth': config['max_depth'], 'depth_encoding': config['depth_encoding'],
         'device': device, 'midas': {'model': 'MiDaS_small', 'source_revision': MIDAS_REVISION, 'efficientnet_revision': EFFICIENTNET_REVISION,
             'preprocessing': 'official small_transform on original RGB; bicubic prediction resize to canonical target grid' if canonical else 'official small_transform after shared RGB resize; bicubic prediction resize',
-            'weights': [{'file': p.name, 'sha256': sha256(p)} for p in (ROOT/'results/midas-cache/checkpoints').glob('midas*')]},
-        'checkpoints': {name: {'path': str(path.resolve()), 'sha256': sha256(path), 'epoch': c['epoch']} for name,path,c in zip(names,args.checkpoints,checkpoints)},
+            'weights': [{'file': p.name, 'sha256': file_hash(p)} for p in (ROOT/'results/midas-cache/checkpoints').glob('midas*')]},
+        'checkpoints': {name: {'path': str(path.resolve()), 'sha256': file_hash(path), 'epoch': c['epoch']} for name,path,c in zip(names,args.checkpoints,checkpoints)},
         'metric_depth_unaligned': {name: m.compute() for name,m in meters.items()},
         'oracle_aligned_relative_depth': {name: m.compute() for name,m in aligned.items()},
         'protocol': 'Per-image ground-truth least-squares scale/shift in inverse depth; nonnegative scale; inverse depth clamped to configured range before inversion. Identical protocol for all methods. Global valid-pixel aggregation.',

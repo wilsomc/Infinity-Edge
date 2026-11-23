@@ -1,5 +1,3 @@
-import copy
-import json
 import random
 import tempfile
 import time
@@ -11,14 +9,13 @@ import numpy as np
 import torch
 from PIL import Image
 
-from dataloader.custom_dataset import CustomDataset, augment_pair
+from dataloader.custom_dataset import augment_pair
 from dataloader.dataloader import load_manifest, make_loader
 from dataloader.preprocessing import prepare_rgb, prepare_depth, restore_prediction, spatial_geometry
 from model.canonical_evaluation import evaluate_canonical, PROTOCOL
 from model.evaluation import DepthMetrics, evaluate
 from model.model import Model, transfer_checkpoint
-from model.staged_training import encoder_stage, train_staged
-from script.CNN import manifest_hash
+from model.staged_training import train_staged
 from script.train_v2 import promote_if_better
 
 
